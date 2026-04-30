@@ -6,6 +6,44 @@
 <title>Martarapiin - Nota Jasa</title>
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import {
+    getFirestore, collection, addDoc, getDocs, deleteDoc, doc, query, orderBy
+  } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+  // =====================================================================
+  // KONFIGURASI FIREBASE
+  // Ganti nilai di bawah ini dengan konfigurasi dari Firebase Console Anda
+  // =====================================================================
+  const firebaseConfig = {
+    apiKey:            "GANTI_DENGAN_API_KEY_ANDA",
+    authDomain:        "GANTI_DENGAN_AUTH_DOMAIN_ANDA",
+    projectId:         "GANTI_DENGAN_PROJECT_ID_ANDA",
+    storageBucket:     "GANTI_DENGAN_STORAGE_BUCKET_ANDA",
+    messagingSenderId: "GANTI_DENGAN_MESSAGING_SENDER_ID_ANDA",
+    appId:             "GANTI_DENGAN_APP_ID_ANDA"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+  const COLLECTION = 'martarapiin_history';
+
+  // Expose Firestore helpers ke scope global agar fungsi lain bisa mengaksesnya
+  window._db         = db;
+  window._collection = collection;
+  window._addDoc     = addDoc;
+  window._getDocs    = getDocs;
+  window._deleteDoc  = deleteDoc;
+  window._doc        = doc;
+  window._query      = query;
+  window._orderBy    = orderBy;
+  window._COLLECTION = COLLECTION;
+  window._firebaseReady = true;
+
+  console.log('Firebase Firestore siap.');
+</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -483,14 +521,14 @@ document.getElementById('loginInput').addEventListener('keydown', function (e) {
 });
 
 //  Tab switching 
-function switchTab(tab) {
+async function switchTab(tab) {
   const isBuat = tab === 'buat';
   document.getElementById('pageBuat').style.display = isBuat ? 'block' : 'none';
   document.getElementById('pageRiwayat').style.display = isBuat ? 'none' : 'block';
   document.getElementById('tabBuat').classList.toggle('active', isBuat);
   document.getElementById('tabRiwayat').classList.toggle('active', !isBuat);
   // Refresh history list whenever the Riwayat tab is opened
-  if (!isBuat) renderHistory();
+  if (!isBuat) await renderHistory();
 }
 
 //  Modal helpers 
@@ -885,7 +923,7 @@ function buildNotaHTML(notaData) {
   // Build service rows
   const serviceRows = notaData.services.map((svc, i) => {
     const pagesText = svc.pages !== null && svc.pages !== undefined
-      ? `${svc.pages} hal.`
+      ? `${svc.pages}`
       : '';
     const descText = svc.description ? ` <span style="color:#6B7280;font-size:11px">(${svc.description})</span>` : '';
     return `
@@ -1023,31 +1061,30 @@ function printNota() {
 }
 
 //  HistoryModule 
-// Mirrors logic in src/history.js (inlined so index.html runs without a bundler).
+// HistoryModule — Firebase Firestore
+// Semua nota disimpan di Firestore sehingga tersinkron di semua perangkat.
+// Fallback ke localStorage jika Firebase belum siap (offline/konfigurasi belum diisi).
 
 const HISTORY_KEY = 'martarapiin_history';
 
-/**
- * Checks whether localStorage is available in the current browser context.
- * Returns false in private-browsing modes that block storage access.
- * @returns {boolean}
- */
+/** Cek apakah Firebase sudah siap digunakan */
+function isFirebaseReady() {
+  return window._firebaseReady === true &&
+    window._db && window._COLLECTION &&
+    window._COLLECTION !== 'martarapiin_history' ||
+    (window._firebaseReady === true && window._db);
+}
+
+/** Fallback: baca dari localStorage */
 function isLocalStorageAvailable() {
   try {
     const testKey = '__martarapiin_test__';
     localStorage.setItem(testKey, '1');
     localStorage.removeItem(testKey);
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-/**
- * Reads the raw nota array from localStorage.
- * Returns an empty array if storage is unavailable or data is corrupt.
- * @returns {Array<Object>}
- */
 function readHistoryRaw() {
   if (!isLocalStorageAvailable()) return [];
   try {
@@ -1055,41 +1092,83 @@ function readHistoryRaw() {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 /**
- * Loads all saved notas, sorted descending by createdAt (newest first).
- * @returns {Array<Object>}
+ * Memuat semua nota dari Firestore, diurutkan terbaru di atas.
+ * Fallback ke localStorage jika Firebase tidak tersedia.
+ * @returns {Promise<Array<Object>>}
  */
-function loadHistory() {
-  return readHistoryRaw().slice().sort((a, b) => {
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
+async function loadHistory() {
+  if (isFirebaseReady()) {
+    try {
+      const q = window._query(
+        window._collection(window._db, window._COLLECTION),
+        window._orderBy('createdAt', 'desc')
+      );
+      const snapshot = await window._getDocs(q);
+      return snapshot.docs.map(d => ({ _docId: d.id, ...d.data() }));
+    } catch (err) {
+      console.warn('Firestore gagal, fallback ke localStorage:', err);
+    }
+  }
+  // Fallback localStorage
+  return readHistoryRaw().slice().sort((a, b) =>
+    new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
 }
 
 /**
- * Saves a new nota to localStorage.
- * Throws on QuotaExceededError so the caller can show a user-friendly message.
+ * Menyimpan nota baru ke Firestore.
+ * Fallback ke localStorage jika Firebase tidak tersedia.
  * @param {Object} notaData
  */
-function persistNota(notaData) {
+async function persistNota(notaData) {
+  if (isFirebaseReady()) {
+    try {
+      await window._addDoc(
+        window._collection(window._db, window._COLLECTION),
+        notaData
+      );
+      return;
+    } catch (err) {
+      console.warn('Firestore gagal, fallback ke localStorage:', err);
+    }
+  }
+  // Fallback localStorage
   if (!isLocalStorageAvailable()) {
-    throw new Error('localStorage tidak tersedia di browser ini.');
+    throw new Error('Penyimpanan tidak tersedia di browser ini.');
   }
   const history = readHistoryRaw();
   history.push(notaData);
-  // May throw DOMException (QuotaExceededError)  propagated to caller
   localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
 }
 
 /**
- * Deletes a nota by ID from localStorage and re-renders the history list.
- * @param {string} notaId
+ * Menghapus nota berdasarkan ID dari Firestore.
+ * Fallback ke localStorage jika Firebase tidak tersedia.
+ * @param {string} notaId  — nilai field `id` pada dokumen nota
  */
-function deleteNotaById(notaId) {
+async function deleteNotaById(notaId) {
+  if (isFirebaseReady()) {
+    try {
+      // Cari dokumen berdasarkan field id (bukan Firestore doc ID)
+      const snapshot = await window._getDocs(
+        window._collection(window._db, window._COLLECTION)
+      );
+      const target = snapshot.docs.find(d => d.data().id === notaId);
+      if (target) {
+        await window._deleteDoc(
+          window._doc(window._db, window._COLLECTION, target.id)
+        );
+      }
+      return;
+    } catch (err) {
+      console.warn('Firestore gagal, fallback ke localStorage:', err);
+    }
+  }
+  // Fallback localStorage
   if (!isLocalStorageAvailable()) return;
   const history = readHistoryRaw();
   const filtered = history.filter(n => n.id !== notaId);
@@ -1100,11 +1179,10 @@ function deleteNotaById(notaId) {
 let _currentDetailNotaId = null;
 
 /**
- * Validates the form, collects data, saves to localStorage, resets the form,
- * and switches to the Riwayat tab.
- * Handles QuotaExceededError and unavailable localStorage gracefully.
+ * Validates the form, collects data, saves to Firestore/localStorage,
+ * resets the form, and switches to the Riwayat tab.
  */
-function saveNota() {
+async function saveNota() {
   const validation = validateForm();
   if (!validation.valid) {
     alert(validation.message);
@@ -1114,40 +1192,30 @@ function saveNota() {
   const notaData = collectFormData();
 
   try {
-    persistNota(notaData);
+    await persistNota(notaData);
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'QuotaExceededError') {
-      alert('Penyimpanan penuh. Hapus beberapa nota lama untuk melanjutkan.');
-    } else {
-      alert('Riwayat tidak dapat disimpan: ' + err.message);
-    }
+    alert('Riwayat tidak dapat disimpan: ' + err.message);
     return;
   }
 
   // Reset form and navigate to history tab
   newNota();
   switchTab('riwayat');
-  renderHistory();
+  await renderHistory();
 }
 
 /**
  * Renders the list of saved notas into #historyList.
  * Shows an empty-state message when there are no saved notas.
  */
-function renderHistory() {
+async function renderHistory() {
   const container = document.getElementById('historyList');
   if (!container) return;
 
-  if (!isLocalStorageAvailable()) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon"></div>
-        <div>Riwayat tidak tersedia  localStorage tidak didukung di browser ini.</div>
-      </div>`;
-    return;
-  }
+  // Show loading state
+  container.innerHTML = `<div class="empty-state"><div style="font-size:13px;color:var(--gray)">Memuat riwayat...</div></div>`;
 
-  const history = loadHistory();
+  const history = await loadHistory();
 
   if (history.length === 0) {
     container.innerHTML = `
@@ -1174,8 +1242,8 @@ function renderHistory() {
          onkeydown="if(event.key==='Enter'||event.key===' ')showDetail('${nota.id}')">
       <div class="nota-info">
         <div class="nota-num">${nota.number}</div>
-        <div class="nota-customer"> ${nota.customerName}</div>
-        <div class="nota-date"> ${formatDisplayDate(nota.createdAt)}</div>
+        <div class="nota-customer">${nota.customerName}</div>
+        <div class="nota-date">${formatDisplayDate(nota.createdAt)}</div>
       </div>
       <div class="nota-right">
         <div class="nota-total">${formatRupiah(nota.total)}</div>
@@ -1187,8 +1255,8 @@ function renderHistory() {
  * Opens the detail modal for the nota with the given ID.
  * @param {string} notaId
  */
-function showDetail(notaId) {
-  const history = loadHistory();
+async function showDetail(notaId) {
+  const history = await loadHistory();
   const nota = history.find(n => n.id === notaId);
   if (!nota) return;
 
@@ -1238,16 +1306,16 @@ async function downloadJPGFromDetail() {
  * Deletes the nota currently shown in the detail modal, closes the modal,
  * and re-renders the history list.
  */
-function deleteFromDetail() {
+async function deleteFromDetail() {
   if (!_currentDetailNotaId) return;
 
   if (!confirm('Hapus nota ini dari riwayat? Tindakan ini tidak dapat dibatalkan.')) return;
 
-  deleteNotaById(_currentDetailNotaId);
+  await deleteNotaById(_currentDetailNotaId);
   _currentDetailNotaId = null;
 
   closeModal('detailModal');
-  renderHistory();
+  await renderHistory();
 }
 
 //  Initialisation 
